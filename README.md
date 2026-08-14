@@ -10,7 +10,7 @@
 
 ## Overview
 
-This repository demonstrates an end-to-end analytics workflow: correlated synthetic data generation, relational modeling, constraints and indexes, bulk loading, data-quality gates, business SQL, result export, visualization, tests, and CI. Files in `sql/analytics/` are the single source of truth: Python only executes those files, exports their result sets, and plots them. GitHub Actions runs the complete workflow against a real MySQL 8 service.
+This repository demonstrates an end-to-end analytics workflow: correlated synthetic data generation, relational modeling, constraints and indexes, bulk loading, data-quality gates, business SQL, result export, visualization, tests, and CI. [`sql/11_views.sql`](sql/11_views.sql) is the reusable semantic view layer, while [`sql/analytics/`](sql/analytics/) is the canonical analytics/export query layer. Python never duplicates business SQL: it executes these files, exports their result sets, and plots them. GitHub Actions runs the complete workflow against a real MySQL 8 service.
 
 ## Business Problem
 
@@ -32,7 +32,7 @@ All figures below were generated from the final MySQL 8.0.46 run with `--users 5
 | Repeat purchase rate | 83.50% |
 | Average days to second purchase | 35.90 |
 | Average cohort M1 / M2 / M3 | 56.79% / 57.50% / 57.53% |
-| Top category | Electronics (21,441,390.67 revenue) |
+| Top category | Electronics (21,428,707.38 reconciled revenue) |
 
 The repeat rate is intentionally high because orders are concentrated among high-value and regular profiles; the full traffic base still contains many non-buyers. Synthetic findings demonstrate analytical technique and are not claims about a real company.
 
@@ -65,11 +65,11 @@ Money uses `DECIMAL(12,2)`, dates use `DATE`/`DATETIME`, and MySQL 8 `CHECK`, `F
 
 ## Data Quality
 
-[`sql/03_data_quality.sql`](sql/03_data_quality.sql) checks duplicate keys, nulls, orphan users/products/orders/payments, pre-signup events, dataset-end boundaries, invalid money/quantity, refund-status conflicts, and order-to-item amount reconciliation. It is a blocking Pipeline gate: any nonzero result stops analytics and figure generation. The final run passed **13 checks with zero issues**.
+[`sql/03_data_quality.sql`](sql/03_data_quality.sql) checks duplicate keys, nulls, orphan users/products/orders/payments, pre-signup events, dataset-end boundaries, invalid money/quantity, refund-status conflicts, order-to-item amounts, and product-to-order revenue reconciliation. It is a blocking Pipeline gate: any nonzero result stops analytics and figure generation. The final run passed **14 checks with zero issues**.
 
 ## Business KPI and Conversion Funnel
 
-Revenue includes only `paid` and `completed` orders. Canonical export queries live in [`sql/analytics/`](sql/analytics/), and [`src/export/export_results.py`](src/export/export_results.py) contains filenames rather than duplicated SQL strings.
+Revenue includes only `paid` and `completed` orders. Reusable definitions live in the semantic views; canonical export queries live in [`sql/analytics/`](sql/analytics/), and [`src/export/export_results.py`](src/export/export_results.py) contains filenames rather than duplicated SQL strings.
 
 ![Monthly revenue](reports/figures/02_monthly_gmv.png)
 
@@ -112,7 +112,7 @@ Monthly cohort retention is active users in an activity month divided by that re
 
 ## Product Analysis
 
-Product and category SQL calculates buyers, units, revenue, cost-based gross profit/margin, and category Top-N. `DENSE_RANK() OVER (PARTITION BY category ORDER BY revenue DESC)` provides grouped rankings.
+Product analysis distinguishes `item_net_sales` (item amount after item-level discount) from reconciled `revenue`. Order-level discounts and shipping are allocated proportionally by item net sales; the rounding residual is assigned deterministically to the smallest `order_item_id`, so product revenue sums exactly to successful-order `total_amount` at cent precision. Cost, gross profit, gross margin, buyers, units, and category Top-N are then derived from that reconciled amount. `DENSE_RANK() OVER (PARTITION BY category ORDER BY revenue DESC)` preserves true ties; `product_id` appears only in the final output ordering for deterministic display.
 
 ![Category revenue](reports/figures/09_category_revenue.png)
 ![Top products](reports/figures/10_top_products.png)
@@ -141,8 +141,9 @@ Composite indexes follow the leftmost-prefix rule and match common equality-plus
 
 ```text
 src/                 generation, validation, MySQL load, export, visualization, pipeline
-sql/analytics/       single-source KPI, funnel, RFM, retention, product, behavior SQL
-sql/*.sql            schema, indexes, blocking quality gate, views, EXPLAIN
+sql/11_views.sql      reusable semantic view layer
+sql/analytics/       canonical analytics and export query layer
+sql/*.sql            schema, indexes, blocking quality gate, EXPLAIN
 reports/tables/      versioned SQL query results
 reports/figures/     README-ready 180-DPI figures
 notebooks/           display-only results notebook
@@ -170,7 +171,7 @@ The local demo maps MySQL 8 to port `3307`; credentials in Compose are explicitl
 
 ## Tests and Reproducibility
 
-The final local run passed **10 tests**. Integration coverage verifies MySQL 8, tables, foreign keys, views, nonempty data, the 13-check quality gate, KPIs, reach/strict funnels, and RFM. CI generates 1,000 users, loads MySQL, runs the gate and canonical analytics, then runs every test. Test data is written to temporary directories and cannot overwrite portfolio-scale CSVs.
+The final local run passed **12 tests**. Integration coverage verifies MySQL 8, tables, foreign keys, views, nonempty data, the 14-check quality gate, KPIs, reach/strict funnels, RFM, product fields, and exact product-to-order revenue reconciliation. CI generates 1,000 users, loads MySQL, runs the gate and canonical analytics, then runs every test. Test data is written to temporary directories and cannot overwrite portfolio-scale CSVs.
 
 ## Limitations and Future Work
 

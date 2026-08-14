@@ -1,7 +1,41 @@
 USE ecommerce_analytics;
 CREATE OR REPLACE VIEW vw_paid_orders AS SELECT order_id,user_id,order_time,total_amount FROM orders WHERE order_status IN('paid','completed');
 CREATE OR REPLACE VIEW vw_daily_kpis AS SELECT DATE(order_time) metric_date,COUNT(*) paid_orders,COUNT(DISTINCT user_id) paying_users,SUM(total_amount) revenue,AVG(total_amount) aov FROM orders WHERE order_status IN('paid','completed') GROUP BY DATE(order_time);
-CREATE OR REPLACE VIEW vw_product_performance AS SELECT p.product_id,p.category,COUNT(DISTINCT o.user_id) buyers,SUM(i.quantity) units,SUM(i.quantity*i.unit_price-i.discount) revenue FROM products p JOIN order_items i USING(product_id) JOIN orders o USING(order_id) WHERE o.order_status IN('paid','completed') GROUP BY p.product_id,p.category;
+CREATE OR REPLACE VIEW vw_product_performance AS
+WITH item_base AS (
+  SELECT i.order_item_id,i.order_id,i.product_id,p.category,o.user_id,i.quantity,p.cost,
+         i.quantity*i.unit_price-i.discount item_net_sales,
+         o.total_amount,o.discount_amount,o.shipping_amount,
+         SUM(i.quantity*i.unit_price-i.discount) OVER(PARTITION BY i.order_id) order_item_net_sales
+  FROM order_items i
+  JOIN products p USING(product_id)
+  JOIN orders o USING(order_id)
+  WHERE o.order_status IN('paid','completed')
+), proportional AS (
+  SELECT item_base.*,
+         item_net_sales
+         - discount_amount*item_net_sales/NULLIF(order_item_net_sales,0)
+         + shipping_amount*item_net_sales/NULLIF(order_item_net_sales,0) raw_allocated_revenue,
+         quantity*cost product_cost
+  FROM item_base
+), rounded AS (
+  SELECT proportional.*,ROUND(raw_allocated_revenue,2) rounded_revenue,
+         ROW_NUMBER() OVER(PARTITION BY order_id ORDER BY order_item_id) allocation_row,
+         SUM(ROUND(raw_allocated_revenue,2)) OVER(PARTITION BY order_id) rounded_order_revenue
+  FROM proportional
+), allocated AS (
+  SELECT rounded.*,
+         CASE WHEN allocation_row=1
+              THEN rounded_revenue+(total_amount-rounded_order_revenue)
+              ELSE rounded_revenue END allocated_revenue
+  FROM rounded
+)
+SELECT product_id,category,COUNT(DISTINCT user_id) buyers,SUM(quantity) units,
+       SUM(item_net_sales) item_net_sales,SUM(allocated_revenue) revenue,
+       SUM(product_cost) cost,SUM(allocated_revenue-product_cost) gross_profit,
+       SUM(allocated_revenue-product_cost)/NULLIF(SUM(allocated_revenue),0) gross_margin
+FROM allocated
+GROUP BY product_id,category;
 CREATE OR REPLACE VIEW vw_rfm_segments AS WITH b AS (SELECT user_id,DATEDIFF((SELECT DATE(MAX(order_time)) FROM orders),DATE(MAX(order_time))) recency,COUNT(*) frequency,SUM(total_amount) monetary FROM orders WHERE order_status IN('paid','completed') GROUP BY user_id),s AS (SELECT b.*,6-NTILE(5) OVER(ORDER BY recency,user_id) r_score,NTILE(5) OVER(ORDER BY frequency,user_id) f_score,NTILE(5) OVER(ORDER BY monetary,user_id) m_score FROM b) SELECT s.*,CASE WHEN r_score>=4 AND f_score>=4 AND m_score>=4 THEN 'Champions' WHEN f_score>=4 AND m_score>=3 THEN 'Loyal Customers' WHEN r_score>=4 AND f_score BETWEEN 2 AND 3 THEN 'Potential Loyalists' WHEN r_score=5 AND f_score=1 THEN 'New Customers' WHEN r_score<=2 AND f_score>=3 THEN 'At Risk' WHEN r_score<=2 AND f_score<=2 THEN 'Hibernating' ELSE 'Other' END rfm_segment FROM s;
 CREATE OR REPLACE VIEW vw_user_profile AS
 WITH event_agg AS (SELECT user_id,DATE(MAX(event_time)) last_active_date,COUNT(DISTINCT DATE(event_time)) active_days,SUM(event_type='view') view_count,SUM(event_type='add_to_cart') cart_count,SUM(event_type='purchase') purchase_count FROM user_events GROUP BY user_id),

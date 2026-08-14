@@ -41,6 +41,26 @@ def test_loaded_data_and_quality_gate():
 @pytest.mark.skipif(os.getenv('RUN_MYSQL_TESTS')!='1',reason='set RUN_MYSQL_TESTS=1 for MySQL integration')
 def test_core_analytics_queries_execute():
     analytics = ROOT / "sql/analytics"
-    for name in ("monthly_kpis","conversion_funnel","strict_conversion_funnel","rfm_segments"):
+    for name in ("monthly_kpis","conversion_funnel","strict_conversion_funnel","rfm_segments","product_performance"):
         result = query_file(analytics / f"{name}.sql")
         assert not result.empty
+    product = query_file(analytics / "product_performance.sql")
+    assert {"item_net_sales","revenue","cost","gross_profit","gross_margin","category_rank"} <= set(product.columns)
+
+@pytest.mark.skipif(os.getenv('RUN_MYSQL_TESTS')!='1',reason='set RUN_MYSQL_TESTS=1 for MySQL integration')
+def test_product_revenue_reconciles_to_paid_orders():
+    conn = connect()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT SUM(revenue) FROM vw_product_performance")
+            product_revenue = cur.fetchone()[0]
+            cur.execute("SELECT SUM(total_amount) FROM orders WHERE order_status IN('paid','completed')")
+            order_revenue = cur.fetchone()[0]
+        assert abs(product_revenue-order_revenue) <= 0.02
+    finally:
+        conn.close()
+
+def test_product_dense_rank_preserves_ties():
+    sql = (ROOT / "sql/analytics/product_performance.sql").read_text(encoding="utf-8")
+    assert "PARTITION BY category ORDER BY revenue DESC)" in sql
+    assert "PARTITION BY category ORDER BY revenue DESC,product_id" not in sql

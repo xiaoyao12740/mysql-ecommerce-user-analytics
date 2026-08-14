@@ -10,7 +10,7 @@
 
 ## 项目概览与业务问题
 
-项目完整覆盖：关联模拟数据、关系建模、约束和索引、批量导入、数据质量门禁、业务 SQL、结果导出、可视化、测试与 CI。`sql/analytics/` 是业务口径唯一真源；Python 只读取并执行这些文件、导出结果和制图。GitHub Actions 会启动真实 MySQL 8 服务并运行完整链路。
+项目完整覆盖：关联模拟数据、关系建模、约束和索引、批量导入、数据质量门禁、业务 SQL、结果导出、可视化、测试与 CI。[`sql/11_views.sql`](sql/11_views.sql) 是可复用语义视图层，[`sql/analytics/`](sql/analytics/) 是规范分析与导出查询层。Python 不复制业务 SQL，只执行这些文件、导出结果和制图。GitHub Actions 会启动真实 MySQL 8 服务并运行完整链路。
 
 业务目标是统一回答：用户在哪个漏斗步骤流失、哪些渠道和商品创造价值、哪些 Cohort 持续活跃、哪些客户群值得重点运营。所有指标口径集中在 SQL 中，避免重复分析出现冲突。
 
@@ -30,7 +30,7 @@
 | 复购率 | 83.50% |
 | 平均第二次购买间隔 | 35.90 天 |
 | Cohort 平均 M1 / M2 / M3 | 56.79% / 57.50% / 57.53% |
-| 收入最高品类 | Electronics（21,441,390.67） |
+| 收入最高品类 | Electronics（可对账收入 21,428,707.38） |
 
 复购率较高是因为生成逻辑把订单集中在高价值和常规用户，而总体流量仍包含大量不购买用户。所有结论仅用于展示分析能力，不代表真实企业表现。
 
@@ -63,11 +63,11 @@ erDiagram
 
 ## 数据质量
 
-[`sql/03_data_quality.sql`](sql/03_data_quality.sql) 检查主键重复、NULL、孤立外键、注册前事件、数据集截止时间、非法金额/数量、退款状态冲突和订单金额对账。它是阻塞式 Pipeline 门禁：任一异常非零，分析和制图立即停止。最终 **13 项检查全部为 0**。
+[`sql/03_data_quality.sql`](sql/03_data_quality.sql) 检查主键重复、NULL、孤立外键、注册前事件、数据集截止时间、非法金额/数量、退款状态冲突、订单明细金额，以及商品与订单收入对账。它是阻塞式 Pipeline 门禁：任一异常非零，分析和制图立即停止。最终 **14 项检查全部为 0**。
 
 ## 核心 KPI 与转化漏斗
 
-Revenue 只统计 `paid/completed` 订单。规范查询集中在 [`sql/analytics/`](sql/analytics/)；导出器只保存 SQL 文件名，不再复制业务 SQL 字符串。
+Revenue 只统计 `paid/completed` 订单。可复用定义位于语义 VIEW，规范导出查询位于 [`sql/analytics/`](sql/analytics/)；导出器只保存 SQL 文件名，不再复制业务 SQL 字符串。
 
 ![月度收入](reports/figures/02_monthly_gmv.png)
 
@@ -110,7 +110,7 @@ Champions 是收入最高分层：4,196 人、收入 19,928,686.82。所有 RFM 
 
 ## 商品分析
 
-SQL 计算买家数、销量、收入、基于成本的粗略毛利/毛利率，并用 `DENSE_RANK() OVER(PARTITION BY category ...)` 完成各品类 Top-N。
+商品分析区分 `item_net_sales`（扣除明细级优惠后的商品金额）与可对账 `revenue`。订单级优惠和运费按明细净额比例分摊，分摊到分后产生的尾差固定归入最小 `order_item_id`，因此商品 Revenue 能以分为精度与成功订单 `total_amount` 严格对账。在此基础上计算成本、毛利、毛利率、买家数、销量和品类 Top-N。`DENSE_RANK() OVER(PARTITION BY category ORDER BY revenue DESC)` 保留真正的并列排名，`product_id` 只用于最终稳定展示排序。
 
 ![品类收入](reports/figures/09_category_revenue.png)
 ![Top 商品](reports/figures/10_top_products.png)
@@ -137,8 +137,9 @@ WHERE order_status IN ('paid', 'completed');
 
 ```text
 src/               生成、校验、MySQL 导入、导出、制图、Pipeline
-sql/analytics/     KPI、双口径漏斗、RFM、留存、商品、行为唯一真源
-sql/*.sql          建表、索引、阻塞式质量门禁、视图、EXPLAIN
+sql/11_views.sql   可复用语义视图层
+sql/analytics/     规范分析与导出查询层
+sql/*.sql          建表、索引、阻塞式质量门禁、EXPLAIN
 reports/tables/    可提交的 SQL 查询结果
 reports/figures/   180 DPI README 图片
 notebooks/         只展示结果的 Notebook
@@ -162,7 +163,7 @@ pytest -q
 
 ## 测试、复现与限制
 
-最终本地测试 **10 passed**。集成测试验证 MySQL 8、表、外键、VIEW、非空数据、13 项质量门禁、KPI、Reach/严格漏斗和 RFM。CI 生成 1,000 用户并真正完成建库、导入、门禁、分析和测试。测试数据使用临时目录，不会覆盖正式 CSV。
+最终本地测试 **12 passed**。集成测试验证 MySQL 8、表、外键、VIEW、非空数据、14 项质量门禁、KPI、Reach/严格漏斗、RFM、商品字段，以及商品收入与成功订单收入的精确对账。CI 生成 1,000 用户并真正完成建库、导入、门禁、分析和测试。测试数据使用临时目录，不会覆盖正式 CSV。
 
 项目使用模拟数据，渠道效果和因果关系仅为展示；执行耗时依赖硬件和统计信息。未来可增加定时快照和 BI Dashboard，但不把 SQL 核心分析迁移到 pandas。预测型机器学习刻意不在范围内。
 

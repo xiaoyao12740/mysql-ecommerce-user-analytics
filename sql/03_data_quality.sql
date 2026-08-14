@@ -11,4 +11,8 @@ UNION ALL SELECT 'payment_status_mismatch',COUNT(*) FROM payments p JOIN orders 
 UNION ALL SELECT 'payment_after_dataset_end',COUNT(*) FROM payments WHERE payment_time>'2025-12-31 23:59:59'
 UNION ALL SELECT 'order_after_dataset_end',COUNT(*) FROM orders WHERE order_time>'2025-12-31 23:59:59'
 UNION ALL SELECT 'event_after_dataset_end',COUNT(*) FROM user_events WHERE event_time>'2025-12-31 23:59:59'
-UNION ALL SELECT 'order_total_mismatch',COUNT(*) FROM orders o JOIN (SELECT order_id,ROUND(SUM(quantity*unit_price-discount),2) item_total FROM order_items GROUP BY order_id) i ON o.order_id=i.order_id WHERE ABS(o.total_amount-(i.item_total-o.discount_amount+o.shipping_amount))>.02;
+UNION ALL SELECT 'order_total_mismatch',COUNT(*) FROM orders o JOIN (SELECT order_id,ROUND(SUM(quantity*unit_price-discount),2) item_total FROM order_items GROUP BY order_id) i ON o.order_id=i.order_id WHERE ABS(o.total_amount-(i.item_total-o.discount_amount+o.shipping_amount))>.02
+UNION ALL SELECT 'product_revenue_reconciliation',IF(ABS(
+  COALESCE((SELECT SUM(revenue) FROM vw_product_performance),0)
+  - COALESCE((SELECT SUM(total_amount) FROM orders WHERE order_status IN('paid','completed')),0)
+)>.02,1,0);
