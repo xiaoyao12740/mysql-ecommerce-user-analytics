@@ -3,9 +3,34 @@ on: [push, pull_request]
 jobs:
   test:
     runs-on: ubuntu-latest
+    services:
+      mysql:
+        image: mysql:8.0
+        env:
+          MYSQL_ROOT_PASSWORD: local_root_demo
+          MYSQL_DATABASE: ecommerce_analytics
+          MYSQL_USER: ecommerce_user
+          MYSQL_PASSWORD: local_demo_password
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="mysqladmin ping -h localhost -uroot -plocal_root_demo"
+          --health-interval=5s
+          --health-timeout=5s
+          --health-retries=20
+    env:
+      MYSQL_HOST: 127.0.0.1
+      MYSQL_PORT: 3306
+      MYSQL_DATABASE: ecommerce_analytics
+      MYSQL_USER: ecommerce_user
+      MYSQL_PASSWORD: local_demo_password
+      RUN_MYSQL_TESTS: 1
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-python@v6
         with: {python-version: '3.11'}
       - run: pip install -r requirements.txt
-      - run: pytest -q -m "not integration"
+      - name: Run MySQL-backed analytics pipeline
+        run: python -m src.pipeline --users 1000 --seed 42
+      - name: Run unit and MySQL integration tests
+        run: pytest -q

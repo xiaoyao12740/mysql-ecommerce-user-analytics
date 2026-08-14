@@ -13,8 +13,9 @@ END = pd.Timestamp("2025-12-31 23:59:59")
 def _dates(rng, low, high, n):
     return pd.to_datetime(rng.integers(low.value // 10**9, high.value // 10**9, n), unit="s")
 
-def generate(users: int = 50_000, seed: int = 42) -> dict[str, int]:
-    rng = np.random.default_rng(seed); RAW.mkdir(parents=True, exist_ok=True)
+def generate(users: int = 50_000, seed: int = 42, output_dir: Path | None = None) -> dict[str, int]:
+    raw = Path(output_dir) if output_dir is not None else RAW
+    rng = np.random.default_rng(seed); raw.mkdir(parents=True, exist_ok=True)
     n_products = max(500, min(1500, users // 25))
     channels = np.array(["organic","search","social","referral","display","affiliate"])
     channel_p = np.array([.23,.24,.19,.12,.10,.12])
@@ -56,7 +57,7 @@ def generate(users: int = 50_000, seed: int = 42) -> dict[str, int]:
         odf["total_amount"]=(subtotal.to_numpy()-odf.discount_amount+shipping).round(2)
         paymask=np.isin(status,["paid","completed","refunded"]); po=odf.loc[paymask]
         pstatus=np.where(po.order_status.eq("refunded"),"refunded","success")
-        paytime=po.order_time+pd.to_timedelta(rng.integers(1,180,len(po)),unit="m")
+        paytime=(po.order_time+pd.to_timedelta(rng.integers(1,180,len(po)),unit="m")).clip(upper=END)
         paydf=pd.DataFrame({"payment_id":np.arange(1,len(po)+1),"order_id":po.order_id.to_numpy(),"payment_time":paytime,
             "payment_method":rng.choice(["alipay","wechat","card"],len(po),p=[.42,.37,.21]),"payment_amount":po.total_amount.to_numpy(),"payment_status":pstatus})
         # Events are noisy but correlated: every user registers; orders add purchase/payment, plus browsing/cart history.
@@ -68,7 +69,7 @@ def generate(users: int = 50_000, seed: int = 42) -> dict[str, int]:
             # Pre-purchase browsing cannot precede registration.
             t=max(row.order_time-pd.Timedelta(minutes=int(rng.integers(8,240))), signup[row.user_id-1]+pd.Timedelta(hours=1))
             for typ,delta in [("view",0),("add_to_cart",int(rng.integers(1,30))),("purchase",int(rng.integers(31,80)))]:
-                if typ!="add_to_cart" or rng.random()<.76: ev.append((eid,row.user_id,t+pd.Timedelta(minutes=delta),typ,prod,sess,dev)); eid+=1
+                if typ!="add_to_cart" or rng.random()<.76: ev.append((eid,row.user_id,min(t+pd.Timedelta(minutes=delta),END),typ,prod,sess,dev)); eid+=1
             if row.order_status in ("paid","completed","refunded"): ev.append((eid,row.user_id,min(row.order_time+pd.Timedelta(minutes=90),END),"payment",prod,sess,dev)); eid+=1
         # Non-order sessions create realistic abandonment and favorites.
         # Fewer distinct sessions with multiple page views avoids artificially
@@ -78,11 +79,11 @@ def generate(users: int = 50_000, seed: int = 42) -> dict[str, int]:
             lo=signup[uid-1]; t=_dates(rng,lo,max(lo+pd.Timedelta(days=1),END),1)[0]; prod=int(rng.integers(1,n_products+1)); sess=f"b{uid}-{j}"
             for view_n in range(int(rng.integers(3,6))):
                 view_prod=prod if view_n==0 else int(rng.integers(1,n_products+1))
-                ev.append((eid,uid,t+pd.Timedelta(minutes=view_n),"view",view_prod,sess,udf.device.iloc[uid-1])); eid+=1
-            if rng.random()<.18: ev.append((eid,uid,t+pd.Timedelta(minutes=3),"favorite",prod,sess,udf.device.iloc[uid-1])); eid+=1
-            if rng.random()<.025: ev.append((eid,uid,t+pd.Timedelta(minutes=5),"add_to_cart",prod,sess,udf.device.iloc[uid-1])); eid+=1
+                ev.append((eid,uid,min(t+pd.Timedelta(minutes=view_n),END),"view",view_prod,sess,udf.device.iloc[uid-1])); eid+=1
+            if rng.random()<.18: ev.append((eid,uid,min(t+pd.Timedelta(minutes=3),END),"favorite",prod,sess,udf.device.iloc[uid-1])); eid+=1
+            if rng.random()<.025: ev.append((eid,uid,min(t+pd.Timedelta(minutes=5),END),"add_to_cart",prod,sess,udf.device.iloc[uid-1])); eid+=1
         edf=pd.DataFrame(ev,columns=["event_id","user_id","event_time","event_type","product_id","session_id","device"])
-    for name,df in {"users":udf,"products":pdf,"orders":odf,"order_items":idf,"payments":paydf,"user_events":edf}.items(): df.to_csv(RAW/f"{name}.csv",index=False)
+    for name,df in {"users":udf,"products":pdf,"orders":odf,"order_items":idf,"payments":paydf,"user_events":edf}.items(): df.to_csv(raw/f"{name}.csv",index=False)
     return {k:len(v) for k,v in {"users":udf,"products":pdf,"events":edf,"orders":odf,"order_items":idf,"payments":paydf}.items()}
 
 def main():

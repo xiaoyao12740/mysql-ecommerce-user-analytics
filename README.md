@@ -10,7 +10,7 @@
 
 ## Overview
 
-This repository demonstrates an end-to-end analytics workflow: correlated synthetic data generation, relational modeling, constraints and indexes, bulk loading, data-quality gates, business SQL, result export, visualization, tests, and CI. Python only orchestrates, exports, and plots; all business metrics are calculated in MySQL.
+This repository demonstrates an end-to-end analytics workflow: correlated synthetic data generation, relational modeling, constraints and indexes, bulk loading, data-quality gates, business SQL, result export, visualization, tests, and CI. Files in `sql/analytics/` are the single source of truth: Python only executes those files, exports their result sets, and plots them. GitHub Actions runs the complete workflow against a real MySQL 8 service.
 
 ## Business Problem
 
@@ -28,7 +28,7 @@ All figures below were generated from the final MySQL 8.0.46 run with `--users 5
 | Paid orders / Paying users | 117,593 / 21,364 |
 | Revenue / AOV | 46,655,349.36 / 396.75 |
 | Refund rate | 4.95% |
-| Overall view-to-payment CVR | 43.57% |
+| Reach / strict sequential view-to-payment CVR | 43.57% / 41.76% |
 | Repeat purchase rate | 83.50% |
 | Average days to second purchase | 35.90 |
 | Average cohort M1 / M2 / M3 | 56.79% / 57.50% / 57.53% |
@@ -65,15 +65,15 @@ Money uses `DECIMAL(12,2)`, dates use `DATE`/`DATETIME`, and MySQL 8 `CHECK`, `F
 
 ## Data Quality
 
-[`sql/03_data_quality.sql`](sql/03_data_quality.sql) checks duplicate keys, nulls, orphan users/products/orders/payments, pre-signup events, invalid money/quantity, refund-status conflicts, and order-to-item amount reconciliation. The final run returned **zero issues for every check**.
+[`sql/03_data_quality.sql`](sql/03_data_quality.sql) checks duplicate keys, nulls, orphan users/products/orders/payments, pre-signup events, dataset-end boundaries, invalid money/quantity, refund-status conflicts, and order-to-item amount reconciliation. It is a blocking Pipeline gate: any nonzero result stops analytics and figure generation. The final run passed **13 checks with zero issues**.
 
 ## Business KPI and Conversion Funnel
 
-Revenue includes only `paid` and `completed` orders. GMV, revenue, paid orders, paying users, AOV, ARPU/ARPPU, paying rate, refund rate, and daily/monthly/channel breakdowns live in [`sql/04_basic_kpis.sql`](sql/04_basic_kpis.sql).
+Revenue includes only `paid` and `completed` orders. Canonical export queries live in [`sql/analytics/`](sql/analytics/), and [`src/export/export_results.py`](src/export/export_results.py) contains filenames rather than duplicated SQL strings.
 
 ![Monthly revenue](reports/figures/02_monthly_gmv.png)
 
-The funnel is user-level and deduplicated: a user counts once per stage during the analysis period. It permits valid skipped steps and does not mistake repeated events for additional users.
+The reach funnel is user-level and deduplicated: a user counts once if they reached a stage anywhere in the period. The strict sequential funnel additionally requires `view_time <= cart_time <= purchase_time <= payment_time`. Keeping both definitions makes the sequencing trade-off explicit.
 
 ![Conversion funnel](reports/figures/03_conversion_funnel.png)
 
@@ -84,11 +84,13 @@ The funnel is user-level and deduplicated: a user counts once per stage during t
 | Purchase | 21,942 | 92.98% |
 | Payment | 21,567 | 98.29% |
 
+Strict sequential results are 49,496 views, 23,599 carts, 21,008 purchases, and 20,668 payments, giving a 41.76% overall CVR. See [`conversion_funnel.sql`](sql/analytics/conversion_funnel.sql) and [`strict_conversion_funnel.sql`](sql/analytics/strict_conversion_funnel.sql).
+
 ![Channel conversion](reports/figures/04_channel_conversion.png)
 
 ## User Behavior Analysis
 
-`LEAD()` builds adjacent event transitions inside each session; conditional aggregation measures session engagement and payment conversion. See [`sql/06_user_behavior.sql`](sql/06_user_behavior.sql).
+`LEAD()` builds adjacent event transitions inside each session; conditional aggregation measures session engagement and payment conversion. See [`behavior_transitions.sql`](sql/analytics/behavior_transitions.sql).
 
 ![Behavior transitions](reports/figures/11_user_behavior_transition.png)
 
@@ -99,11 +101,11 @@ R, F, and M are derived only from successful orders. `NTILE(5)` assigns quintile
 ![RFM segments](reports/figures/06_rfm_segments.png)
 ![RFM revenue](reports/figures/07_rfm_revenue.png)
 
-Champions are the largest revenue segment (4,222 users; 19,984,860.61 revenue). Full output: [`reports/tables/rfm_segments.csv`](reports/tables/rfm_segments.csv).
+Champions are the largest revenue segment (4,196 users; 19,928,686.82 revenue). `user_id` is a stable tie-breaker in every RFM `NTILE(5)`. Full output: [`reports/tables/rfm_segments.csv`](reports/tables/rfm_segments.csv).
 
 ## Retention and Repeat Purchase
 
-Monthly cohort retention is active users in an activity month divided by that registration cohort's initial users. M0 includes registration activity; M1+ measures return activity. [`sql/08_retention_repeat_purchase.sql`](sql/08_retention_repeat_purchase.sql) also uses `ROW_NUMBER()` and `LAG()` for first/second purchases and gaps. D1/D7/D30 can be derived with the same event-date convention.
+Monthly cohort retention is active users in an activity month divided by that registration cohort's initial users. M0 includes registration activity; M1+ measures return activity. [`retention_cohort.sql`](sql/analytics/retention_cohort.sql) and [`repeat_purchase.sql`](sql/analytics/repeat_purchase.sql) use the same centralized conventions; the latter uses `ROW_NUMBER()` and `LAG()` for first/second purchases and gaps.
 
 ![Cohort retention](reports/figures/05_retention_cohort.png)
 ![Repeat purchase](reports/figures/08_repeat_purchase.png)
@@ -117,7 +119,7 @@ Product and category SQL calculates buyers, units, revenue, cost-based gross pro
 
 ## Window Functions
 
-Business uses are collected in [`sql/10_window_functions.sql`](sql/10_window_functions.sql): `ROW_NUMBER()` purchase order, `RANK()`/`DENSE_RANK()` product ranking, `LAG()` purchase gaps, `LEAD()` next behavior, `SUM() OVER()` cumulative/rolling revenue, `AVG() OVER()` moving average, and `NTILE()` RFM scoring.
+Window functions are embedded in their canonical business queries: `ROW_NUMBER()`/`LAG()` in [`repeat_purchase.sql`](sql/analytics/repeat_purchase.sql), `DENSE_RANK()` in [`product_performance.sql`](sql/analytics/product_performance.sql), `LEAD()` in [`behavior_transitions.sql`](sql/analytics/behavior_transitions.sql), and deterministic `NTILE()` in [`sql/11_views.sql`](sql/11_views.sql).
 
 ```sql
 WITH ranked AS (
@@ -131,7 +133,7 @@ SELECT * FROM ranked WHERE purchase_number = 2;
 
 ## Query Optimization
 
-Composite indexes follow the leftmost-prefix rule and match common equality-plus-time-range access patterns: `user_events(user_id,event_time)`, `orders(user_id,order_time)`, and event/product/status variants. Actual `EXPLAIN` returned `type=range`, keys `idx_events_user_time` and `idx_orders_user_time`, with 16 and 1 estimated rows respectively—rather than full-table scans. No fabricated millisecond comparison is reported.
+Composite indexes follow the leftmost-prefix rule and match common equality-plus-time-range access patterns: `user_events(user_id,event_time)`, `orders(user_id,order_time)`, and event/product/status variants. The final `EXPLAIN` returned `type=range`, keys `idx_events_user_time` and `idx_orders_user_time`, with 23 and 1 estimated rows respectively—rather than full-table scans. No fabricated millisecond comparison is reported.
 
 ![Query optimization](reports/figures/12_query_optimization.png)
 
@@ -139,12 +141,13 @@ Composite indexes follow the leftmost-prefix rule and match common equality-plus
 
 ```text
 src/                 generation, validation, MySQL load, export, visualization, pipeline
-sql/                 schema, indexes, quality, KPIs, funnel, RFM, retention, views, EXPLAIN
+sql/analytics/       single-source KPI, funnel, RFM, retention, product, behavior SQL
+sql/*.sql            schema, indexes, blocking quality gate, views, EXPLAIN
 reports/tables/      versioned SQL query results
 reports/figures/     README-ready 180-DPI figures
 notebooks/           display-only results notebook
-tests/               data, metric, and optional MySQL integration tests
-.github/workflows/   CI for database-independent tests
+tests/               isolated data tests, metric tests, MySQL integration tests
+.github/workflows/   MySQL 8-backed end-to-end CI
 ```
 
 ## Quick Start
@@ -167,7 +170,7 @@ The local demo maps MySQL 8 to port `3307`; credentials in Compose are explicitl
 
 ## Tests and Reproducibility
 
-The final local run passed **6 tests**, including a live MySQL 8 connection test (`RUN_MYSQL_TESTS=1`). CI excludes only the integration-marked test. Seed 42, fixed 2025 dates, `pathlib`, pinned business definitions, and deterministic generation make results reproducible.
+The final local run passed **10 tests**. Integration coverage verifies MySQL 8, tables, foreign keys, views, nonempty data, the 13-check quality gate, KPIs, reach/strict funnels, and RFM. CI generates 1,000 users, loads MySQL, runs the gate and canonical analytics, then runs every test. Test data is written to temporary directories and cannot overwrite portfolio-scale CSVs.
 
 ## Limitations and Future Work
 
@@ -176,4 +179,3 @@ This is synthetic data: channel effects and behavioral causality are illustrativ
 ## Tech Stack and License
 
 MySQL 8, SQL, Python 3.10+, pandas, NumPy, PyMySQL, SQLAlchemy, Matplotlib, pytest, Jupyter, Docker, GitHub Actions. Licensed under [MIT](LICENSE).
-
